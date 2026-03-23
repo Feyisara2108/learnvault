@@ -1,17 +1,19 @@
 import { Button, Icon, Text } from "@stellar/design-system"
 import { useState } from "react"
+import { useTranslation } from "react-i18next"
 import { NavLink } from "react-router-dom"
 import styles from "../App.module.css"
 import { WalletButton } from "./WalletButton"
 
 export default function NavBar() {
 	const [menuOpen, setMenuOpen] = useState(false)
+	const { t } = useTranslation()
 
 	const navLinks = [
-		{ to: "/learn", label: "Learn" },
-		{ to: "/dao", label: "DAO" },
-		{ to: "/leaderboard", label: "Leaderboard" },
-		{ to: "/profile", label: "My Profile" },
+		{ to: "/learn", label: t("nav.learn") },
+		{ to: "/dao", label: t("nav.dao") },
+		{ to: "/leaderboard", label: t("nav.leaderboard") },
+		{ to: "/profile", label: t("nav.profile") },
 	]
 
 	return (
