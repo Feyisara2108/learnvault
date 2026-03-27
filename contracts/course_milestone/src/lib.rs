@@ -2,9 +2,19 @@
 #![allow(deprecated)]
 
 use soroban_sdk::{
-    Address, Env, String, Symbol, Vec, contract, contracterror, contractevent, contractimpl,
-    contracttype, panic_with_error, symbol_short,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    symbol_short, Address, Env, String, Symbol, Vec,
 };
+
+// ---------------------------------------------------------------------------
+// Storage Constants (assuming ~6s ledger time)
+// ---------------------------------------------------------------------------
+
+const DAY_IN_LEDGERS: u32 = 17_280;
+const INSTANCE_BUMP_THRESHOLD: u32 = DAY_IN_LEDGERS;
+const INSTANCE_EXTEND_TO: u32 = DAY_IN_LEDGERS * 30; // 30 days
+const PERSISTENT_BUMP_THRESHOLD: u32 = DAY_IN_LEDGERS;
+const PERSISTENT_EXTEND_TO: u32 = DAY_IN_LEDGERS * 365; // 1 year
 
 #[contracttype]
 pub enum DataKey {
@@ -72,9 +82,13 @@ pub enum Error {
     CourseAlreadyComplete = 6,
     InvalidMilestones = 7,
     CourseAlreadyExists = 8,
+    NotEnrolled = 9,
+    DuplicateSubmission = 10,
+    ContractPaused = 11,
     AlreadyEnrolled = 9,
     NotEnrolled = 10,
     DuplicateSubmission = 11,
+    ContractPaused = 12,
 }
 
 #[contractevent]
@@ -112,6 +126,8 @@ impl CourseMilestone {
         env.storage()
             .instance()
             .set(&LEARN_TOKEN_KEY, &learn_token_contract);
+        
+        Self::extend_instance(&env);
     }
 
     // Design decision: only the initialized admin can create course records.
@@ -146,6 +162,9 @@ impl CourseMilestone {
         env.storage()
             .persistent()
             .set(&DataKey::CourseIds, &course_ids);
+        
+        Self::extend_persistent(&env, &course_key);
+        Self::extend_persistent(&env, &DataKey::CourseIds);
     }
 
     // Design decision: removed courses are marked inactive instead of deleted so historical references remain valid.
@@ -232,11 +251,14 @@ impl CourseMilestone {
     // MAIN FUNCTIONS
     // =======================
 
-    pub fn enroll(env: Env, learner: Address, course_id: String) {
+    fn assert_not_paused(env: &Env) {
         if Self::is_paused(env.clone()) {
-            panic!("Contract is paused");
+            panic_with_error!(env, Error::ContractPaused);
         }
+    }
 
+    pub fn enroll(env: Env, learner: Address, course_id: String) {
+        Self::assert_not_paused(&env);
         Self::require_initialized(&env);
         learner.require_auth();
 
@@ -247,11 +269,12 @@ impl CourseMilestone {
 
         let key = DataKey::Enrollment(learner.clone(), course_id.clone());
         if env.storage().persistent().has(&key) {
-            panic_with_error!(&env, Error::Unauthorized);
+            panic_with_error!(&env, Error::AlreadyEnrolled);
         }
 
         env.storage().persistent().set(&key, &true);
         Self::bump_persistent_ttl(&env, &key);
+        Self::extend_persistent(&env, &key);
 
         let courses_key = DataKey::EnrolledCourses(learner.clone());
         let mut courses: Vec<String> = env
@@ -262,6 +285,7 @@ impl CourseMilestone {
         courses.push_back(course_id.clone());
         env.storage().persistent().set(&courses_key, &courses);
         Self::bump_persistent_ttl(&env, &courses_key);
+        Self::extend_persistent(&env, &courses_key);
 
         env.events().publish(
             (symbol_short!("enrolled"),),
@@ -286,14 +310,14 @@ impl CourseMilestone {
         evidence_uri: String,
     ) {
         if Self::is_paused(env.clone()) {
-            panic!("Contract is paused");
+            panic_with_error!(&env, Error::ContractPaused);
         }
 
         Self::require_initialized(&env);
         learner.require_auth();
 
         if !Self::is_enrolled(env.clone(), learner.clone(), course_id.clone()) {
-            panic_with_error!(&env, Error::Unauthorized);
+            panic_with_error!(&env, Error::NotEnrolled);
         }
 
         let state_key = DataKey::MilestoneState(learner.clone(), course_id.clone(), milestone_id);
@@ -305,7 +329,7 @@ impl CourseMilestone {
         Self::bump_persistent_ttl(&env, &state_key);
 
         if current_state != MilestoneStatus::NotStarted {
-            panic_with_error!(&env, Error::Unauthorized);
+            panic_with_error!(&env, Error::DuplicateSubmission);
         }
 
         let submission = MilestoneSubmission {
@@ -321,7 +345,9 @@ impl CourseMilestone {
         env.storage()
             .persistent()
             .set(&state_key, &MilestoneStatus::Pending);
-        Self::bump_persistent_ttl(&env, &state_key);
+        
+        Self::extend_persistent(&env, &submission_key);
+        Self::extend_persistent(&env, &state_key);
 
         env.events().publish(
             (symbol_short!("submitted"), milestone_id),
@@ -339,14 +365,23 @@ impl CourseMilestone {
         course_id: String,
         milestone_id: u32,
     ) -> MilestoneStatus {
+        Self::extend_instance(&env);
         let key = DataKey::MilestoneState(learner, course_id, milestone_id);
-        let state = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(MilestoneStatus::NotStarted);
-        Self::bump_persistent_ttl(&env, &key);
-        state
+        if let Some(state) = env.storage().persistent().get::<_, MilestoneStatus>(&key) {
+            Self::extend_persistent(&env, &key);
+            state
+        } else {
+            MilestoneStatus::NotStarted
+        }
+    }
+
+    pub fn get_milestone_status(
+        env: Env,
+        learner: Address,
+        course_id: String,
+        milestone_id: u32,
+    ) -> MilestoneStatus {
+        Self::get_milestone_state(env, learner, course_id, milestone_id)
     }
 
     pub fn get_milestone_submission(
@@ -406,17 +441,23 @@ impl CourseMilestone {
             .get::<_, CourseConfig>(&course_key)
         {
             Some(config) => {
-                Self::bump_persistent_ttl(env, &course_key);
+                Self::extend_persistent(env, &course_key);
                 config.active
-            }
+            },
             None => false,
         }
     }
 
-    fn bump_persistent_ttl(env: &Env, key: &DataKey) {
+    fn extend_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_EXTEND_TO);
+    }
+
+    fn extend_persistent(env: &Env, key: &DataKey) {
         env.storage()
             .persistent()
-            .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
+            .extend_ttl(key, PERSISTENT_BUMP_THRESHOLD, PERSISTENT_EXTEND_TO);
     }
 }
 
