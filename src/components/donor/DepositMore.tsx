@@ -1,6 +1,6 @@
 import React, { useState } from "react"
-import { useNotification } from "../../hooks/useNotification"
 import { useWallet } from "../../hooks/useWallet"
+import { useToast } from "../Toast/ToastProvider"
 
 interface DepositMoreProps {
 	onDepositSuccess?: () => void
@@ -12,7 +12,7 @@ export const DepositMore: React.FC<DepositMoreProps> = ({
 	const [amount, setAmount] = useState("")
 	const [isLoading, setIsLoading] = useState(false)
 	const { address, signTransaction } = useWallet()
-	const { addNotification } = useNotification()
+	const { showSuccess, showError, showInfo } = useToast()
 
 	const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
 		const value = e.target.value
@@ -29,12 +29,12 @@ export const DepositMore: React.FC<DepositMoreProps> = ({
 		e.preventDefault()
 
 		if (!address) {
-			addNotification("Please connect your wallet", "error")
+			showError("Please connect your wallet")
 			return
 		}
 
 		if (!amount || parseFloat(amount) <= 0) {
-			addNotification("Please enter a valid amount", "error")
+			showError("Please enter a valid amount")
 			return
 		}
 
@@ -50,14 +50,15 @@ export const DepositMore: React.FC<DepositMoreProps> = ({
 			const depositAmount = parseFloat(amount)
 
 			if (!signTransaction) {
-				addNotification("Wallet does not support signing", "error")
+				showError("Wallet does not support signing")
 				setIsLoading(false)
 				return
 			}
 
-			addNotification(
+			showInfo("Waiting for wallet approval…")
+			// TODO: replace simulated flow with actual contract deposit call
+			showSuccess(
 				`Deposit of $${depositAmount.toLocaleString()} USDC submitted!`,
-				"success",
 			)
 			setAmount("")
 
@@ -65,7 +66,7 @@ export const DepositMore: React.FC<DepositMoreProps> = ({
 				onDepositSuccess()
 			}
 		} catch (_error) {
-			addNotification("Failed to process deposit. Please try again.", "error")
+			showError("Failed to process deposit. Please try again.")
 		} finally {
 			setIsLoading(false)
 		}
